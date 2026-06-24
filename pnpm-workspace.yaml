@@ -9,3 +9,4 @@ allowBuilds:
   prisma: true
   "@prisma/engines": true
   esbuild: true
+  workerd: true
