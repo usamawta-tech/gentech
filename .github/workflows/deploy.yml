@@ -42,12 +42,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
+      - name: Build Next.js
         run: pnpm build
+
+      - name: Build for Cloudflare Pages
+        run: pnpm dlx @cloudflare/next-on-pages
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy .next --project-name=gentech
+          command: pages deploy .vercel/output/static --project-name=gentech
