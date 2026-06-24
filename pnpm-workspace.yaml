@@ -1,0 +1,11 @@
+# pnpm only runs install/build scripts for explicitly trusted dependencies.
+# - sharp: native image pipeline used by Next.js <Image> optimization
+# - unrs-resolver: native module resolver used by eslint-config-next
+# - prisma / @prisma/engines: Prisma client + query engine
+# - esbuild: used by tsx for running TS scripts (seed)
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
+  prisma: true
+  "@prisma/engines": true
+  esbuild: true

@@ -1,0 +1,465 @@
+// GenTech Marketplace — Prisma schema
+// Phase 1: identity & access (Better Auth models) + user profile.
+// Catalog / messaging / reviews models are added in later phases.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+  runtime  = "nodejs"
+}
+
+// Prisma 7: connection URLs live in prisma.config.ts (migrations) and the
+// runtime driver adapter (client). The datasource only declares the provider.
+datasource db {
+  provider = "postgresql"
+}
+
+/// Coarse-grained authorization role. A single account buys *and* sells;
+/// ADMIN is a privileged superset. Kept in sync with `USER_ROLES` in lib/constants.ts.
+enum Role {
+  USER
+  ADMIN
+}
+
+// ---------------------------------------------------------------------------
+// Better Auth core models (field names must match Better Auth's expectations).
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Application fields
+  role      Role      @default(USER)
+  banned    Boolean   @default(false)
+  banReason String?
+  deletedAt DateTime?
+
+  // Relations — auth
+  sessions Session[]
+  accounts Account[]
+  profile  Profile?
+
+  // Relations — marketplace
+  listings              Listing[]
+  favorites             Favorite[]
+  savedSearches         SavedSearch[]
+  sentMessages          Message[]      @relation("MessageSender")
+  buyerConversations    Conversation[] @relation("ConversationBuyer")
+  sellerConversations   Conversation[] @relation("ConversationSeller")
+  reviewsAuthored       Review[]       @relation("ReviewAuthor")
+  reviewsReceived       Review[]       @relation("ReviewTarget")
+  reportsFiled          Report[]       @relation("ReportReporter")
+  reportsAgainst        Report[]       @relation("ReportTargetUser")
+  notifications         Notification[]
+
+  @@index([role])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String   @unique
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}
+
+// ---------------------------------------------------------------------------
+// Application: extended user profile (1:1 with User).
+// ---------------------------------------------------------------------------
+
+model Profile {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio        String?
+  phone      String?
+  coverImage String?
+  // Location (denormalised; PostGIS geometry added in the discovery phase)
+  city       String?
+  address    String?
+  latitude   Float?
+  longitude  Float?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("profile")
+}
+
+// ---------------------------------------------------------------------------
+// Catalog: categories, brands, listings, media.
+// ---------------------------------------------------------------------------
+
+/// Physical condition of an item. Tuned for phones but reusable for any product.
+enum ListingCondition {
+  NEW
+  OPEN_BOX
+  USED
+  REFURBISHED
+  FOR_PARTS
+}
+
+/// Lifecycle state machine for a listing.
+enum ListingStatus {
+  DRAFT
+  ACTIVE
+  SOLD
+  EXPIRED
+  REMOVED
+}
+
+/// Self-referential category tree (e.g. Mobile Phones → Smartphones).
+model Category {
+  id          String  @id @default(cuid())
+  name        String
+  slug        String  @unique
+  description String?
+  icon        String?
+  image       String?
+  position    Int     @default(0)
+  isActive    Boolean @default(true)
+
+  parentId String?
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryTree")
+
+  listings Listing[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([parentId])
+  @@index([isActive])
+  @@map("category")
+}
+
+/// Manufacturer/brand (Apple, Samsung, ...). Enables brand pages and filters.
+model Brand {
+  id       String  @id @default(cuid())
+  name     String  @unique
+  slug     String  @unique
+  logo     String?
+  position Int     @default(0)
+  isActive Boolean @default(true)
+
+  listings Listing[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("brand")
+}
+
+model Listing {
+  id          String  @id @default(cuid())
+  title       String
+  slug        String  @unique
+  description String
+
+  // Pricing — ALWAYS Decimal, never Float.
+  price      Decimal @db.Decimal(12, 2)
+  currency   String  @default("PKR")
+  negotiable Boolean @default(false)
+
+  condition ListingCondition
+  status    ListingStatus    @default(ACTIVE)
+
+  /// Category-specific structured attributes (storage, ram, color, batteryHealth,
+  /// ptaApproved, ...). Validated by a per-category Zod schema at the app layer.
+  attributes Json?
+
+  // Media
+  videoUrl String?
+
+  /// Full-text search vector over title + description. Populated by the app on
+  /// create/update (see listing.repository) and queried with ts_rank.
+  searchVector Unsupported("tsvector")?
+
+  // Location (denormalised; PostGIS geometry added in the discovery phase)
+  city      String?
+  area      String?
+  latitude  Float?
+  longitude Float?
+
+  // Engagement metrics
+  views         Int     @default(0)
+  isFeatured    Boolean @default(false)
+  featuredUntil DateTime?
+
+  // Relations
+  sellerId String
+  seller   User   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  brandId String?
+  brand   Brand?  @relation(fields: [brandId], references: [id], onDelete: SetNull)
+
+  images        ListingImage[]
+  favorites     Favorite[]
+  conversations Conversation[]
+  reports       Report[]
+  reviews       Review[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  soldAt    DateTime?
+  expiresAt DateTime?
+  deletedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([categoryId, status])
+  @@index([brandId])
+  @@index([sellerId])
+  @@index([isFeatured, status])
+  @@index([city])
+  @@index([searchVector], type: Gin)
+  @@map("listing")
+}
+
+model ListingImage {
+  id          String  @id @default(cuid())
+  url         String
+  publicId    String? // Cloudinary public id (for deletion/transforms)
+  width       Int?
+  height      Int?
+  blurDataUrl String?
+  position    Int     @default(0)
+  isPrimary   Boolean @default(false)
+
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([listingId])
+  @@map("listing_image")
+}
+
+// ---------------------------------------------------------------------------
+// Engagement: favorites + saved searches.
+// ---------------------------------------------------------------------------
+
+model Favorite {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, listingId])
+  @@index([listingId])
+  @@map("favorite")
+}
+
+model SavedSearch {
+  id      String  @id @default(cuid())
+  name    String?
+  /// The query string + structured filters (category, price range, condition, ...).
+  query   String?
+  filters Json?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("saved_search")
+}
+
+// ---------------------------------------------------------------------------
+// Messaging: a conversation is scoped to a listing between a buyer and seller.
+// ---------------------------------------------------------------------------
+
+model Conversation {
+  id String @id @default(cuid())
+
+  listingId String?
+  listing   Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  buyerId String
+  buyer   User   @relation("ConversationBuyer", fields: [buyerId], references: [id], onDelete: Cascade)
+
+  sellerId String
+  seller   User   @relation("ConversationSeller", fields: [sellerId], references: [id], onDelete: Cascade)
+
+  messages      Message[]
+  lastMessageAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([listingId, buyerId, sellerId])
+  @@index([buyerId])
+  @@index([sellerId])
+  @@map("conversation")
+}
+
+model Message {
+  id       String  @id @default(cuid())
+  body     String?
+  imageUrl String?
+
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  senderId String
+  sender   User   @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([conversationId, createdAt])
+  @@map("message")
+}
+
+// ---------------------------------------------------------------------------
+// Reviews: directed ratings between users, optionally tied to a listing.
+// ---------------------------------------------------------------------------
+
+model Review {
+  id      String @id @default(cuid())
+  rating  Int // 1..5, enforced at the application layer
+  comment String?
+
+  authorId String
+  author   User   @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  targetUserId String
+  targetUser   User   @relation("ReviewTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  listingId String?
+  listing   Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([authorId, targetUserId, listingId])
+  @@index([targetUserId])
+  @@map("review")
+}
+
+// ---------------------------------------------------------------------------
+// Moderation: reports + notifications.
+// ---------------------------------------------------------------------------
+
+enum ReportReason {
+  SPAM
+  SCAM_OR_FRAUD
+  PROHIBITED_ITEM
+  COUNTERFEIT
+  OFFENSIVE
+  WRONG_CATEGORY
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWING
+  RESOLVED
+  DISMISSED
+}
+
+model Report {
+  id      String       @id @default(cuid())
+  reason  ReportReason
+  details String?
+  status  ReportStatus @default(OPEN)
+
+  reporterId String
+  reporter   User   @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+
+  listingId String?
+  listing   Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  reportedUserId String?
+  reportedUser   User?   @relation("ReportTargetUser", fields: [reportedUserId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@map("report")
+}
+
+enum NotificationType {
+  MESSAGE
+  LISTING_SOLD
+  LISTING_EXPIRED
+  NEW_REVIEW
+  PRICE_DROP
+  SYSTEM
+}
+
+model Notification {
+  id    String           @id @default(cuid())
+  type  NotificationType
+  title String
+  body  String?
+  /// Arbitrary payload (e.g. { listingId, conversationId }).
+  data  Json?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@map("notification")
+}

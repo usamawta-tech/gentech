@@ -1,0 +1,29 @@
+# Local Postgres for GenTech development.
+# Usage (once Docker Desktop is installed & running):
+#   docker compose up -d        # start the database
+#   docker compose down         # stop it (data is kept in the named volume)
+#   docker compose down -v      # stop and DELETE all data
+#
+# Matches the DATABASE_URL/DIRECT_URL in .env:
+#   postgresql://gentech:gentech@localhost:5432/gentech?sslmode=disable
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: gentech-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gentech
+      POSTGRES_PASSWORD: gentech
+      POSTGRES_DB: gentech
+    ports:
+      - "5432:5432"
+    volumes:
+      - gentech-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gentech -d gentech"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  gentech-pgdata:
